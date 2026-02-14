@@ -1,59 +1,110 @@
 export default async function handler(req, res) {
-  // 1. CORS Headers
-  res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // ---------- CORS ----------
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
 
   try {
-    // 2. API Key Fix
-    let apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'API Key Missing' });
-    apiKey = apiKey.trim();
-
-    // 3. Auto-Switch Models Logic
-    const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
-    const { contents, mode, prompt } = req.body;
-    
-    let successData = null;
-    let lastError = null;
-
-    for (const model of models) {
-        try {
-            console.log(`Trying ${model}...`);
-            let url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-            let body = { contents, generationConfig: { temperature: 0.7 } };
-
-            if (mode === 'image') {
-                url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${apiKey}`;
-                body = { instances: [{ prompt }], parameters: { sampleCount: 1 } };
-            }
-
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-
-            const data = await response.json();
-            if (response.ok) {
-                successData = data;
-                break; 
-            } else {
-                lastError = data;
-                if (mode === 'image') break;
-            }
-        } catch (e) { console.error(e); }
+    // ---------- API KEY ----------
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "API Key Missing" });
     }
 
-    if (successData) return res.status(200).json(successData);
-    return res.status(500).json({ error: 'Failed', details: lastError });
+    const { mode = "text", contents, prompt } = req.body || {};
 
+    // ---------- IMAGE MODE ----------
+    if (mode === "image") {
+      const imageRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instances: [{ prompt }],
+            parameters: { sampleCount: 1 }
+          })
+        }
+      );
+
+      const imageData = await imageRes.json();
+
+      return res.status(200).json({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text:
+                    imageData?.predictions?.[0]?.bytesBase64Encoded
+                      ? "IMAGE_GENERATED"
+                      : "Image generation failed"
+                }
+              ]
+            }
+          }
+        ],
+        image: imageData?.predictions?.[0]?.bytesBase64Encoded || null
+      });
+    }
+
+    // ---------- TEXT / VOICE MODE ----------
+    const models = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.0-pro"];
+    let finalText = null;
+
+    for (const model of models) {
+      try {
+        const aiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents,
+              generationConfig: { temperature: 0.7 }
+            })
+          }
+        );
+
+        const data = await aiRes.json();
+
+        finalText =
+          data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+          data?.text ||
+          null;
+
+        if (finalText) break;
+      } catch (_) {}
+    }
+
+    // ---------- FINAL SAFE RESPONSE ----------
+    return res.status(200).json({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: finalText || "AI response unavailable"
+              }
+            ]
+          }
+        }
+      ]
+    });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: "Backend error occurred" }]
+          }
+        }
+      ]
+    });
   }
-      }
-      
+        }
